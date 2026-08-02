@@ -55,6 +55,6 @@ ad-hoc 簽章未包含 Apple Developer ID 與 notarization，其他 Mac 第一�
 
 ## 時間來源說明
 
-我檢查了 tixcraft 可讀頁面與前端 JS，沒有看到公開的 server time API。`/activity` 頁可正常回應，且 HTTP response header 會包含同網域的 `X-Timer` 與 `Date`，因此目前用它作為 tixcraft 網域時間錨點。
+tixcraft /activity 內 HTTP response header 會包含同網域的 `X-Timer` 與 `Date`，因此目前用它作為 tixcraft 網域時間錨點。
 
 HTTP `Date` 標準只提供到秒，不提供毫秒。`X-Timer` 有小數秒，但它看起來是 Varnish/CDN 層時間，不一定是 tixcraft 應用程式內部售票判斷用的時鐘；若 tixcraft 之後提供毫秒級 server time API，才能做到真正毫秒級完全一致。
