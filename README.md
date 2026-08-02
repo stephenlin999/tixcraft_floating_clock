@@ -85,6 +85,8 @@ open TixcraftTime.app</code></pre>
 
 <p>HTTP <code>Date</code> 只精確到秒；<code>X-Timer</code> 帶有小數秒，但通常代表 CDN/edge 時間，不一定是售票應用程式的 origin 時鐘。因此本工具不能保證與售票判斷時鐘完全一致。</p>
 
+<p>tixcraft <code>/activity</code> 的 HTTP response header 會包含同網域的 <code>X-Timer</code> 與 <code>Date</code>，因此目前用它作為 tixcraft 網域時間錨點。</p>
+
 </td>
 <td valign="top">
 
@@ -92,6 +94,8 @@ open TixcraftTime.app</code></pre>
 <p>The app is written in Swift/AppKit and sends a HEAD request to the target URL. It uses the RTT midpoint to compensate for network delay, then advances the synchronized time with macOS monotonic uptime instead of relying on per-second system-clock updates.</p>
 
 <p>HTTP <code>Date</code> has only second-level precision. <code>X-Timer</code> includes fractional seconds but usually represents CDN/edge time rather than the ticketing application's origin clock, so the displayed time is not guaranteed to exactly match the ticketing decision clock.</p>
+
+<p>The <code>/activity</code> response exposes both <code>X-Timer</code> and <code>Date</code> headers, which are used as the current time anchor for the Tixcraft domain.</p>
 
 </td>
 </tr>
