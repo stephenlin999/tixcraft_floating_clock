@@ -1,60 +1,144 @@
 # Tixcraft Floating Time
 
-一個非常輕量的 macOS 浮動時間視窗，時間來源是 `https://tixcraft.com/activity` 回應標頭。
+<table>
+<tr>
+<th width="50%">繁體中文</th>
+<th width="50%">English</th>
+</tr>
+<tr>
+<td valign="top">
 
-> 非官方工具，與拓元售票沒有隸屬或合作關係。
+<p>一個輕量的 macOS 浮動時間視窗，使用 <code>https://tixcraft.com/activity</code> 的 HTTP 回應標頭估算拓元網域時間。</p>
 
-## 系統需求
+<p><strong>非官方工具</strong>：本專案與拓元售票沒有隸屬或合作關係。</p>
 
-- macOS 12 或更新版本
-- Xcode Command Line Tools（需提供 `swiftc`）
+<h3>功能</h3>
+<ul>
+<li>視窗固定在最前方，可出現在所有 Space。</li>
+<li>支援拖曳移動。</li>
+<li>顯示 <code>HH:mm:ss.SS</code>，後兩位為百分之一秒。</li>
+<li>每 15 秒重新校時。</li>
+<li>優先使用 <code>X-Timer</code>，退回 HTTP <code>Date</code>。</li>
+<li>關閉時停止 Timer、取消網路請求並結束程序。</li>
+</ul>
 
-## 使用
+<h3>系統需求</h3>
+<ul>
+<li>macOS 12 或更新版本</li>
+<li>Xcode Command Line Tools，需提供 <code>swiftc</code></li>
+</ul>
 
-```zsh
-git clone https://github.com/stephenlin999/tixcraft_floating_clock.git
+</td>
+<td valign="top">
+
+<p>A lightweight macOS floating clock that estimates the time of the Tixcraft domain from HTTP response headers at <code>https://tixcraft.com/activity</code>.</p>
+
+<p><strong>Unofficial tool</strong>: this project is not affiliated with or endorsed by Tixcraft.</p>
+
+<h3>Features</h3>
+<ul>
+<li>Always-on-top floating window across Spaces.</li>
+<li>Draggable window.</li>
+<li>Displays <code>HH:mm:ss.SS</code> with hundredths of a second.</li>
+<li>Resynchronizes every 15 seconds.</li>
+<li>Uses <code>X-Timer</code> first and falls back to HTTP <code>Date</code>.</li>
+<li>Stops timers, cancels requests, and exits cleanly on close.</li>
+</ul>
+
+<h3>Requirements</h3>
+<ul>
+<li>macOS 12 or later</li>
+<li>Xcode Command Line Tools with <code>swiftc</code></li>
+</ul>
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+<h3>快速開始</h3>
+<pre><code>git clone https://github.com/stephenlin999/tixcraft_floating_clock.git
 cd tixcraft_floating_clock
 ./build_app.sh
-open TixcraftTime.app
-```
+open TixcraftTime.app</code></pre>
 
-或直接：
+<p>也可以直接執行 <code>./run.sh</code>。</p>
 
-```zsh
-./run.sh
-```
+</td>
+<td valign="top">
 
-## 行為
+<h3>Quick Start</h3>
+<pre><code>git clone https://github.com/stephenlin999/tixcraft_floating_clock.git
+cd tixcraft_floating_clock
+./build_app.sh
+open TixcraftTime.app</code></pre>
 
-- 視窗固定在最前方，且會出現在所有 Space。
-- 可拖曳移動。
-- 顯示格式為 `HH:mm:ss.SS`，後兩位是百分之一秒。
-- 每 15 秒重新向 `tixcraft.com/activity` 校時。
-- 優先使用 tixcraft 回應標頭中的 `X-Timer` 小數秒時間戳；若沒有，才退回 HTTP `Date`。
-- 退回 `Date` 時會短暫追蹤換秒邊界，讓小數秒比單次讀 header 更穩。
-- 校時後使用 macOS 單調時鐘推進，不依賴系統時鐘每秒更新。
-- 顯示時間為 Asia/Taipei。
-- 關閉視窗時會停止更新 Timer、取消同步中的網路請求並結束程序。
+<p>You can also run <code>./run.sh</code> directly.</p>
 
-## 建置產物
+</td>
+</tr>
+<tr>
+<td valign="top">
 
-`build_app.sh` 會直接以 `swiftc` 編譯 AppKit 程式，建立標準的 `TixcraftTime.app` Bundle，加入圖示後進行 ad-hoc code signing。輸出的 App 會使用執行建置之 Mac 的原生架構。
+<h3>技術方式</h3>
+<p>程式以 Swift/AppKit 建置，對目標網址發送 HEAD request。它使用 RTT 中點補償網路延遲，校時後以 macOS 單調時鐘推進，避免依賴系統時鐘每秒更新。</p>
 
-若要建立可分享的壓縮 DMG：
+<p>HTTP <code>Date</code> 只精確到秒；<code>X-Timer</code> 帶有小數秒，但通常代表 CDN/edge 時間，不一定是售票應用程式的 origin 時鐘。因此本工具不能保證與售票判斷時鐘完全一致。</p>
 
-```zsh
-hdiutil create \
-  -volname TixcraftTime \
-  -srcfolder TixcraftTime.app \
-  -ov \
-  -format UDZO \
-  TixcraftTime.dmg
-```
+</td>
+<td valign="top">
 
-ad-hoc 簽章未包含 Apple Developer ID 與 notarization，其他 Mac 第一次開啟時仍可能顯示 Gatekeeper 提示。
+<h3>Technical Approach</h3>
+<p>The app is written in Swift/AppKit and sends a HEAD request to the target URL. It uses the RTT midpoint to compensate for network delay, then advances the synchronized time with macOS monotonic uptime instead of relying on per-second system-clock updates.</p>
 
-## 時間來源說明
+<p>HTTP <code>Date</code> has only second-level precision. <code>X-Timer</code> includes fractional seconds but usually represents CDN/edge time rather than the ticketing application's origin clock, so the displayed time is not guaranteed to exactly match the ticketing decision clock.</p>
 
-我檢查了 tixcraft 可讀頁面與前端 JS，沒有看到公開的 server time API。`/activity` 頁可正常回應，且 HTTP response header 會包含同網域的 `X-Timer` 與 `Date`，因此目前用它作為 tixcraft 網域時間錨點。
+</td>
+</tr>
+<tr>
+<td valign="top">
 
-HTTP `Date` 標準只提供到秒，不提供毫秒。`X-Timer` 有小數秒，但它看起來是 Varnish/CDN 層時間，不一定是 tixcraft 應用程式內部售票判斷用的時鐘；若 tixcraft 之後提供毫秒級 server time API，才能做到真正毫秒級完全一致。
+<h3>未來開發（規劃中）</h3>
+<p>目標是從單一網站時鐘，演進成可驗證、可擴充、尊重隱私的 edge-time toolkit。</p>
+<ul>
+<li><strong>多來源時間設定檔</strong>：支援自訂網址與不同售票平台的時間來源。</li>
+<li><strong>同步信心視覺化</strong>：把 offset、RTT、jitter 與估計誤差整理成可讀的信心狀態。</li>
+<li><strong>開賣倒數與提示</strong>：倒數、音效與可調提前量，但不自動購票或執行結帳。</li>
+<li><strong>可重播的網路測試</strong>：模擬延遲、封包抖動、錯誤標頭與斷線情境。</li>
+<li><strong>正式發佈流程</strong>：Universal Binary、CI 建置、簽章與 notarization。</li>
+</ul>
+
+</td>
+<td valign="top">
+
+<h3>Proposed Roadmap</h3>
+<p>The goal is to evolve from a single-site clock into a verifiable, extensible, privacy-conscious edge-time toolkit.</p>
+<ul>
+<li><strong>Multi-source profiles</strong>: support custom endpoints and time-source profiles for different ticketing platforms.</li>
+<li><strong>Synchronization confidence</strong>: make offset, RTT, jitter, and estimated error understandable at a glance.</li>
+<li><strong>Sale countdown and alerts</strong>: countdowns, sound cues, and configurable lead time without automating purchases or checkout.</li>
+<li><strong>Replayable network tests</strong>: simulate latency, jitter, malformed headers, and connection failures.</li>
+<li><strong>Release-grade distribution</strong>: Universal Binary builds, CI packaging, signing, and notarization.</li>
+</ul>
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+<h3>安全與限制</h3>
+<p>本程式不要求帳號、不處理憑證或付款資料，也不自動購票或執行結帳流程。它只讀取目標 HTTP 回應標頭，並在關閉時取消 Timer 與 URLSession 工作。</p>
+
+</td>
+<td valign="top">
+
+<h3>Security and Scope</h3>
+<p>The app requires no account, credentials, or payment data. It does not automate ticket purchases or checkout. It only reads HTTP response headers from the target and cancels its timers and URLSession work during shutdown.</p>
+
+</td>
+</tr>
+</table>
+
+## Repository / 儲存庫
+
+<p><a href="https://github.com/stephenlin999/tixcraft_floating_clock">GitHub: stephenlin999/tixcraft_floating_clock</a></p>
