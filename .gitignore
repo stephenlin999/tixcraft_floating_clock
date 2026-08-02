@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+TixcraftTime.app/
+*.dmg
+
+# Generated icon intermediates; keep the final PNG and ICNS sources.
+assets/app-icon/TixcraftTime.iconset/
+assets/app-icon/TixcraftTime.tiff
+
+# Local research and session notes.
+claude_*.md
