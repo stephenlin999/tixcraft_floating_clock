@@ -2,45 +2,180 @@ import AppKit
 import Foundation
 
 private let tixcraftURL = URL(string: "https://tixcraft.com/activity")!
-private let timeZone = TimeZone(identifier: "Asia/Taipei")!
+private let taipeiTimeZone = TimeZone(identifier: "Asia/Taipei")!
+
+private func isTrustedTixcraftURL(_ url: URL?) -> Bool {
+    guard let url,
+          url.scheme?.caseInsensitiveCompare("https") == .orderedSame,
+          let host = url.host else {
+        return false
+    }
+    return host.caseInsensitiveCompare(tixcraftURL.host!) == .orderedSame
+}
+
+private func makeFormatter(_ format: String, timeZone: TimeZone) -> DateFormatter {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = timeZone
+    formatter.dateFormat = format
+    return formatter
+}
+
+private let httpDateFormatter = makeFormatter(
+    "EEE',' dd MMM yyyy HH':'mm':'ss zzz",
+    timeZone: TimeZone(secondsFromGMT: 0)!
+)
+
+private enum Preferences {
+    private static let alwaysOnTopKey = "alwaysOnTop"
+    private static let showHundredthsKey = "showHundredths"
+    private static let syncIntervalKey = "syncInterval"
+
+    static func registerDefaults() {
+        UserDefaults.standard.register(defaults: [
+            alwaysOnTopKey: true,
+            showHundredthsKey: true,
+            syncIntervalKey: 15.0
+        ])
+    }
+
+    static var alwaysOnTop: Bool {
+        get { UserDefaults.standard.bool(forKey: alwaysOnTopKey) }
+        set { UserDefaults.standard.set(newValue, forKey: alwaysOnTopKey) }
+    }
+
+    static var showHundredths: Bool {
+        get { UserDefaults.standard.bool(forKey: showHundredthsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: showHundredthsKey) }
+    }
+
+    static var syncInterval: TimeInterval {
+        get { UserDefaults.standard.double(forKey: syncIntervalKey) }
+        set { UserDefaults.standard.set(newValue, forKey: syncIntervalKey) }
+    }
+}
+
+private final class SettingsWindowController: NSObject {
+    let window: NSWindow
+    var onChange: (() -> Void)?
+
+    private let alwaysOnTopButton = NSButton(
+        checkboxWithTitle: "Keep the clock above other windows",
+        target: nil,
+        action: nil
+    )
+    private let showHundredthsButton = NSButton(
+        checkboxWithTitle: "Show hundredths of a second",
+        target: nil,
+        action: nil
+    )
+    private let intervalPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+
+    override init() {
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 190),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        super.init()
+
+        window.title = "Tixcraft Time Settings"
+        window.isReleasedWhenClosed = false
+        window.setFrameAutosaveName("TixcraftTimeSettingsWindow")
+
+        [15, 30, 60].forEach { seconds in
+            intervalPopup.addItem(withTitle: "\(seconds) seconds")
+            intervalPopup.lastItem?.tag = seconds
+        }
+
+        [alwaysOnTopButton, showHundredthsButton, intervalPopup].forEach {
+            $0.target = self
+            $0.action = #selector(settingChanged)
+        }
+
+        let intervalLabel = NSTextField(labelWithString: "Synchronization interval")
+        let intervalRow = NSStackView(views: [intervalLabel, intervalPopup])
+        intervalRow.orientation = .horizontal
+        intervalRow.spacing = 16
+
+        let stack = NSStackView(views: [alwaysOnTopButton, showHundredthsButton, intervalRow])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 16
+
+        let content = NSView()
+        content.addSubview(stack)
+        window.contentView = content
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24)
+        ])
+    }
+
+    func show() {
+        reload()
+        if window.frameAutosaveName.isEmpty || !window.setFrameUsingName("TixcraftTimeSettingsWindow") {
+            window.center()
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func reload() {
+        alwaysOnTopButton.state = Preferences.alwaysOnTop ? .on : .off
+        showHundredthsButton.state = Preferences.showHundredths ? .on : .off
+        intervalPopup.selectItem(withTag: Int(Preferences.syncInterval))
+    }
+
+    @objc private func settingChanged() {
+        Preferences.alwaysOnTop = alwaysOnTopButton.state == .on
+        Preferences.showHundredths = showHundredthsButton.state == .on
+        if let seconds = intervalPopup.selectedItem?.tag {
+            Preferences.syncInterval = TimeInterval(seconds)
+        }
+        onChange?()
+    }
+}
 
 private final class ClickThroughButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-private struct FetchMetrics {
-    var tcpConnect: TimeInterval?
-    var tlsHandshake: TimeInterval?
-    var ttfb: TimeInterval?
-    var totalDuration: TimeInterval?
-    var vbeMillis: Double?
-}
-
 private final class MetricsCapturingDelegate: NSObject, URLSessionTaskDelegate {
-    private let onMetrics: (FetchMetrics) -> Void
+    private let onTTFB: (TimeInterval?) -> Void
     private var fired = false
 
-    init(onMetrics: @escaping (FetchMetrics) -> Void) {
-        self.onMetrics = onMetrics
+    init(onTTFB: @escaping (TimeInterval?) -> Void) {
+        self.onTTFB = onTTFB
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard isTrustedTixcraftURL(request.url) else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting taskMetrics: URLSessionTaskMetrics) {
         guard !fired else { return }
         fired = true
-        var m = FetchMetrics()
-        m.totalDuration = taskMetrics.taskInterval.duration
-        if let tx = taskMetrics.transactionMetrics.last {
-            if let cs = tx.connectStartDate, let ce = tx.connectEndDate {
-                m.tcpConnect = ce.timeIntervalSince(cs)
-            }
-            if let ss = tx.secureConnectionStartDate, let se = tx.secureConnectionEndDate {
-                m.tlsHandshake = se.timeIntervalSince(ss)
-            }
-            if let reqEnd = tx.requestEndDate, let respStart = tx.responseStartDate {
-                m.ttfb = respStart.timeIntervalSince(reqEnd)
-            }
+        if let transaction = taskMetrics.transactionMetrics.last,
+           let requestEnd = transaction.requestEndDate,
+           let responseStart = transaction.responseStartDate {
+            onTTFB(responseStart.timeIntervalSince(requestEnd))
+        } else {
+            onTTFB(nil)
         }
-        onMetrics(m)
     }
 }
 
@@ -49,7 +184,6 @@ private struct MetricsSnapshot {
     var rttJitter: TimeInterval?
     var ttfb: TimeInterval?
     var vbeMillis: Double?
-    var sampleCount: Int = 0
 }
 
 private final class FloatingTimeView: NSView {
@@ -62,8 +196,6 @@ private final class FloatingTimeView: NSView {
     let closeButton = ClickThroughButton(title: "x", target: nil, action: nil)
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    private var dragStart: NSPoint?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -131,19 +263,11 @@ private final class FloatingTimeView: NSView {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+}
 
-    override func mouseDown(with event: NSEvent) {
-        dragStart = event.locationInWindow
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let window, let dragStart else { return }
-        let current = event.locationInWindow
-        var origin = window.frame.origin
-        origin.x += current.x - dragStart.x
-        origin.y += current.y - dragStart.y
-        window.setFrameOrigin(origin)
-    }
+private final class FloatingWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
 
 private final class TixcraftClock {
@@ -151,13 +275,12 @@ private final class TixcraftClock {
         let serverDate: Date
         let midpoint: TimeInterval
         let roundTrip: TimeInterval
-        let metrics: FetchMetrics?
+        let ttfb: TimeInterval?
+        let vbeMillis: Double?
     }
 
-    private(set) var baseServerDate: Date?
-    private(set) var baseUptime: TimeInterval = 0
+    private var anchor: (date: Date, uptime: TimeInterval)?
     private(set) var lastSync: Date?
-    private(set) var lastStatus = "connecting"
     private var isSyncing = false
     private let shutdownLock = NSLock()
     private var shutdownRequested = false
@@ -165,7 +288,6 @@ private final class TixcraftClock {
     private var rttSamples: [TimeInterval] = []
     private var lastTTFB: TimeInterval?
     private var lastVBE: Double?
-    private let maxSamples = 10
 
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -193,14 +315,12 @@ private final class TixcraftClock {
     }
 
     func currentServerDate() -> Date? {
-        guard let baseServerDate else { return nil }
-        let elapsed = ProcessInfo.processInfo.systemUptime - baseUptime
-        return baseServerDate.addingTimeInterval(elapsed)
+        guard let anchor else { return nil }
+        return anchor.date.addingTimeInterval(ProcessInfo.processInfo.systemUptime - anchor.uptime)
     }
 
     func currentMetrics() -> MetricsSnapshot {
         var snap = MetricsSnapshot()
-        snap.sampleCount = rttSamples.count
         snap.ttfb = lastTTFB
         snap.vbeMillis = lastVBE
         if !rttSamples.isEmpty {
@@ -213,10 +333,10 @@ private final class TixcraftClock {
         return snap
     }
 
-    func sync(completion: @escaping (Bool, String) -> Void) {
+    func sync(completion: @escaping (String) -> Void) {
         guard !isShutDown else { return }
         guard !isSyncing else {
-            completion(false, "syncing")
+            completion("syncing")
             return
         }
         isSyncing = true
@@ -225,52 +345,45 @@ private final class TixcraftClock {
 
     private func recordMetrics(_ sample: ServerSample) {
         rttSamples.append(sample.roundTrip)
-        if rttSamples.count > maxSamples {
-            rttSamples.removeFirst(rttSamples.count - maxSamples)
+        if rttSamples.count > 10 {
+            rttSamples.removeFirst()
         }
-        if let ttfb = sample.metrics?.ttfb {
+        if let ttfb = sample.ttfb {
             lastTTFB = ttfb
         }
-        if let vbe = sample.metrics?.vbeMillis {
+        if let vbe = sample.vbeMillis {
             lastVBE = vbe
         }
     }
 
     private func finishSync(
-        serverDate: Date,
-        uptime: TimeInterval,
+        anchor: (date: Date, uptime: TimeInterval)? = nil,
         status: String,
-        ok: Bool,
-        completion: @escaping (Bool, String) -> Void
+        completion: @escaping (String) -> Void
     ) {
         guard !isShutDown else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.isShutDown else { return }
-            if ok {
-                self.baseServerDate = serverDate
-                self.baseUptime = uptime
+            if let anchor {
+                self.anchor = anchor
                 self.lastSync = Date()
             }
-            self.lastStatus = status
             self.isSyncing = false
-            completion(ok, status)
+            completion(status)
         }
     }
 
     private func collectBoundarySample(
         previous: ServerSample?,
         deadline: TimeInterval,
-        completion: @escaping (Bool, String) -> Void
+        completion: @escaping (String) -> Void
     ) {
         guard !isShutDown else { return }
         fetchSample { [weak self] sample in
             guard let self, !self.isShutDown else { return }
             guard let sample else {
                 self.finishSync(
-                    serverDate: self.baseServerDate ?? Date(),
-                    uptime: self.baseUptime,
                     status: "sync failed",
-                    ok: false,
                     completion: completion
                 )
                 return
@@ -284,10 +397,8 @@ private final class TixcraftClock {
             if let previous, sample.serverDate > previous.serverDate {
                 let boundaryUptime = previous.midpoint + (sample.midpoint - previous.midpoint) / 2
                 self.finishSync(
-                    serverDate: sample.serverDate,
-                    uptime: boundaryUptime,
+                    anchor: (sample.serverDate, boundaryUptime),
                     status: "edge sync",
-                    ok: true,
                     completion: completion
                 )
                 return
@@ -295,10 +406,8 @@ private final class TixcraftClock {
 
             if ProcessInfo.processInfo.systemUptime >= deadline {
                 self.finishSync(
-                    serverDate: sample.serverDate,
-                    uptime: sample.midpoint,
+                    anchor: (sample.serverDate, sample.midpoint),
                     status: "sec sync",
-                    ok: true,
                     completion: completion
                 )
                 return
@@ -322,18 +431,17 @@ private final class TixcraftClock {
 
         let started = ProcessInfo.processInfo.systemUptime
         let lock = NSLock()
-        var capturedMetrics: FetchMetrics?
+        var capturedTTFB: TimeInterval?
         var ended: TimeInterval = started
         var capturedResponse: HTTPURLResponse?
-        var hadError = false
 
         let group = DispatchGroup()
         group.enter()
         group.enter()
 
-        let delegate = MetricsCapturingDelegate { metrics in
+        let delegate = MetricsCapturingDelegate { ttfb in
             lock.lock()
-            capturedMetrics = metrics
+            capturedTTFB = ttfb
             lock.unlock()
             group.leave()
         }
@@ -341,8 +449,7 @@ private final class TixcraftClock {
         let task = session.dataTask(with: request) { _, response, error in
             lock.lock()
             ended = ProcessInfo.processInfo.systemUptime
-            capturedResponse = response as? HTTPURLResponse
-            hadError = (error != nil)
+            capturedResponse = error == nil ? response as? HTTPURLResponse : nil
             lock.unlock()
             group.leave()
         }
@@ -351,70 +458,88 @@ private final class TixcraftClock {
 
         group.notify(queue: DispatchQueue.global(qos: .utility)) { [weak self] in
             guard let self, !self.isShutDown else { return }
-            guard !hadError, let http = capturedResponse else {
+            guard let http = capturedResponse,
+                  isTrustedTixcraftURL(http.url),
+                  let parsed = Self.parseHighPrecisionTime(from: http) else {
                 completion(nil)
                 return
             }
-            guard let parsed = Self.parseHighPrecisionTime(from: http) else {
-                completion(nil)
-                return
-            }
-            var metrics = capturedMetrics
-            if let xTimer = http.value(forHTTPHeaderField: "X-Timer"),
-               let vbe = Self.parseXTimerVBE(xTimer) {
-                if metrics == nil { metrics = FetchMetrics() }
-                metrics?.vbeMillis = vbe
-            }
+            let vbe = http.value(forHTTPHeaderField: "X-Timer")
+                .flatMap(Self.parseVBE)
             let midpoint = started + max(0, ended - started) / 2
             completion(ServerSample(
                 serverDate: parsed,
                 midpoint: midpoint,
                 roundTrip: ended - started,
-                metrics: metrics
+                ttfb: capturedTTFB,
+                vbeMillis: vbe
             ))
         }
     }
 
-    private static func parseHTTPDate(_ string: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
-        return formatter.date(from: string)
-    }
-
     private static func parseHighPrecisionTime(from response: HTTPURLResponse) -> Date? {
         if let xTimer = response.value(forHTTPHeaderField: "X-Timer"),
-           let startEpoch = parseXTimerStart(xTimer) {
+           let startEpoch = parseXTimerValue(xTimer, prefix: "S"),
+           (946_684_800...4_102_444_800).contains(startEpoch) {
             return Date(timeIntervalSince1970: startEpoch)
         }
 
-        if let dateValue = response.value(forHTTPHeaderField: "Date") {
-            return parseHTTPDate(dateValue)
+        if let dateValue = response.value(forHTTPHeaderField: "Date"),
+           let date = httpDateFormatter.date(from: dateValue),
+           (946_684_800...4_102_444_800).contains(date.timeIntervalSince1970) {
+            return date
         }
 
         return nil
     }
 
-    private static func parseXTimerStart(_ string: String) -> TimeInterval? {
+    private static func parseXTimerValue(_ string: String, prefix: String) -> Double? {
         for part in string.split(separator: ",") {
             let trimmed = part.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("S") && !trimmed.hasPrefix("SC") {
-                return TimeInterval(trimmed.dropFirst())
+            if trimmed.hasPrefix(prefix),
+               let value = Double(trimmed.dropFirst(prefix.count)),
+               value.isFinite {
+                return value
             }
         }
         return nil
     }
 
-    private static func parseXTimerVBE(_ string: String) -> Double? {
-        for part in string.split(separator: ",") {
-            let trimmed = part.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("VBE") {
-                return Double(trimmed.dropFirst(3))
-            }
-        }
-        return nil
+    private static func parseVBE(_ string: String) -> Double? {
+        parseXTimerValue(string, prefix: "VBE").flatMap { $0 >= 0 ? $0 : nil }
     }
+
+#if SELF_TEST
+    static func runSelfTests() {
+        precondition(parseXTimerValue("S1700000000.25,VS0,VE1", prefix: "S") == 1_700_000_000.25)
+        precondition(parseXTimerValue("SNaN,VS0,VE1", prefix: "S") == nil)
+        precondition(parseXTimerValue("SInfinity", prefix: "S") == nil)
+        precondition(parseVBE("VBE12.5") == 12.5)
+        precondition(parseVBE("VBE-1") == nil)
+        precondition(isTrustedTixcraftURL(tixcraftURL))
+        precondition(!isTrustedTixcraftURL(URL(string: "https://example.com/activity")))
+        precondition(!isTrustedTixcraftURL(URL(string: "http://tixcraft.com/activity")))
+
+        let validDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let dateHeader = httpDateFormatter.string(from: validDate)
+        let validResponse = HTTPURLResponse(
+            url: tixcraftURL,
+            statusCode: 403,
+            httpVersion: nil,
+            headerFields: ["X-Timer": "S1700000000.25,VE12.5"]
+        )!
+        precondition(parseHighPrecisionTime(from: validResponse) != nil)
+
+        let fallbackResponse = HTTPURLResponse(
+            url: tixcraftURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["X-Timer": "S999", "Date": dateHeader]
+        )!
+        precondition(parseHighPrecisionTime(from: fallbackResponse) != nil)
+        print("Self-tests passed")
+    }
+#endif
 }
 
 private final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -423,40 +548,60 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var displayTimer: Timer?
     private var syncTimer: Timer?
-    private var isShuttingDown = false
+    private var statusItem: NSStatusItem?
+    private var settingsWindowController: SettingsWindowController?
+    private var clockVisibilityItems: [NSMenuItem] = []
+    private var alwaysOnTopMenuItem: NSMenuItem?
 
-    private lazy var timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = timeZone
-        formatter.dateFormat = "HH:mm:ss.SS"
-        return formatter
-    }()
-
-    private lazy var dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = timeZone
-        formatter.dateFormat = "yyyy/MM/dd"
-        return formatter
-    }()
+    private let hundredthsFormatter = makeFormatter("HH:mm:ss.SS", timeZone: taipeiTimeZone)
+    private let secondsFormatter = makeFormatter("HH:mm:ss", timeZone: taipeiTimeZone)
+    private let dateFormatter = makeFormatter("yyyy/MM/dd", timeZone: taipeiTimeZone)
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        shutdown()
+        stopClockActivity()
+        clock.shutdown()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        Preferences.registerDefaults()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.mainMenu = makeMainMenu()
+        configureWindow()
+        configureStatusItem()
+        applyPreferences()
+        showClock()
+    }
 
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        showClock()
+        return true
+    }
+
+    func applicationDidHide(_ notification: Notification) {
+        stopClockActivity()
+        updateMenuState()
+    }
+
+    func applicationDidUnhide(_ notification: Notification) {
+        if window.isVisible {
+            startClockActivity(syncImmediately: false)
+        }
+    }
+
+    private func configureWindow() {
         let size = view.frame.size
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let origin = NSPoint(x: screenFrame.maxX - size.width - 28, y: screenFrame.maxY - size.height - 28)
+        let frameName = "TixcraftFloatingClockWindow"
 
-        window = NSWindow(
+        window = FloatingWindow(
             contentRect: NSRect(origin: origin, size: size),
             styleMask: [.borderless],
             backing: .buffered,
@@ -466,67 +611,234 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
-        window.level = .floating
+        window.isMovableByWindowBackground = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.makeKeyAndOrderFront(nil)
+        window.setFrameAutosaveName(frameName)
+        if !window.setFrameUsingName(frameName) {
+            window.setFrameOrigin(origin)
+        }
 
         view.closeButton.target = self
         view.closeButton.action = #selector(close)
         view.syncButton.target = self
         view.syncButton.action = #selector(forceSync)
+    }
 
-        forceSync()
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { [weak self] _ in
-            self?.refreshDisplay()
+    private func configureStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.autosaveName = "TixcraftTimeStatusItem"
+        item.isVisible = true
+        if let button = item.button {
+            button.image = NSImage(systemSymbolName: "clock", accessibilityDescription: "Tixcraft Time")
+            button.image?.isTemplate = true
+            button.toolTip = "Tixcraft Time"
+            button.setAccessibilityLabel("Tixcraft Time")
         }
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            self?.syncQuietly()
+
+        let menu = NSMenu(title: "Tixcraft Time")
+        menu.addItem(makeVisibilityMenuItem())
+        menu.addItem(menuItem("Sync Now", action: #selector(forceSync)))
+        menu.addItem(.separator())
+
+        let alwaysOnTop = menuItem("Always on Top", action: #selector(toggleAlwaysOnTop))
+        alwaysOnTopMenuItem = alwaysOnTop
+        menu.addItem(alwaysOnTop)
+        menu.addItem(menuItem("Settings…", action: #selector(showSettings), keyEquivalent: ","))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Quit Tixcraft Time", action: #selector(quit), keyEquivalent: "q"))
+
+        item.menu = menu
+        statusItem = item
+        updateMenuState()
+    }
+
+    private func makeMainMenu() -> NSMenu {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: "Tixcraft Time")
+        let aboutItem = NSMenuItem(
+            title: "About Tixcraft Time",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
+        aboutItem.target = NSApp
+        appMenu.addItem(aboutItem)
+        appMenu.addItem(.separator())
+        appMenu.addItem(menuItem("Settings…", action: #selector(showSettings), keyEquivalent: ","))
+        appMenu.addItem(.separator())
+
+        let hideItem = NSMenuItem(
+            title: "Hide Tixcraft Time",
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h"
+        )
+        hideItem.target = NSApp
+        appMenu.addItem(hideItem)
+        appMenu.addItem(.separator())
+
+        let quitItem = menuItem("Quit Tixcraft Time", action: #selector(quit), keyEquivalent: "q")
+        appMenu.addItem(quitItem)
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(makeVisibilityMenuItem())
+        windowMenu.addItem(menuItem("Settings…", action: #selector(showSettings), keyEquivalent: ","))
+        windowMenu.addItem(.separator())
+        let arrangeItem = NSMenuItem(
+            title: "Bring All to Front",
+            action: #selector(NSApplication.arrangeInFront(_:)),
+            keyEquivalent: ""
+        )
+        arrangeItem.target = NSApp
+        windowMenu.addItem(arrangeItem)
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+        NSApp.windowsMenu = windowMenu
+
+        return mainMenu
+    }
+
+    private func menuItem(
+        _ title: String,
+        action: Selector,
+        keyEquivalent: String = ""
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+        item.target = self
+        return item
+    }
+
+    private func makeVisibilityMenuItem() -> NSMenuItem {
+        let item = menuItem("Hide Clock", action: #selector(toggleClockWindow))
+        clockVisibilityItems.append(item)
+        return item
+    }
+
+    private func updateMenuState() {
+        let isVisible = window?.isVisible == true
+        let title = isVisible ? "Hide Clock" : "Show Clock"
+        clockVisibilityItems.forEach { $0.title = title }
+        alwaysOnTopMenuItem?.state = Preferences.alwaysOnTop ? .on : .off
+    }
+
+    private func startClockActivity(syncImmediately: Bool) {
+        guard window.isVisible else { return }
+        scheduleDisplayTimer()
+        scheduleSyncTimer()
+        refreshDisplay()
+        if syncImmediately {
+            forceSync()
         }
     }
 
-    @objc private func close() {
-        shutdown()
-        NSApplication.shared.terminate(nil)
-    }
-
-    private func shutdown() {
-        guard !isShuttingDown else { return }
-        isShuttingDown = true
-
+    private func stopClockActivity() {
         displayTimer?.invalidate()
         displayTimer = nil
         syncTimer?.invalidate()
         syncTimer = nil
-        view.closeButton.target = nil
-        view.closeButton.action = nil
-        view.syncButton.target = nil
-        view.syncButton.action = nil
-        clock.shutdown()
-        window?.orderOut(nil)
     }
 
-    @objc private func forceSync() {
+    private func scheduleDisplayTimer() {
+        displayTimer?.invalidate()
+        let interval = Preferences.showHundredths ? 1.0 / 60.0 : 0.1
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.refreshDisplay()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        displayTimer = timer
+    }
+
+    private func scheduleSyncTimer() {
+        syncTimer?.invalidate()
+        let timer = Timer(timeInterval: max(15, Preferences.syncInterval), repeats: true) { [weak self] _ in
+            self?.syncQuietly()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        syncTimer = timer
+    }
+
+    private func applyPreferences() {
+        window?.level = Preferences.alwaysOnTop ? .floating : .normal
+        updateMenuState()
+        if window?.isVisible == true {
+            scheduleDisplayTimer()
+            scheduleSyncTimer()
+            refreshDisplay()
+        }
+    }
+
+    @objc private func toggleClockWindow(_ sender: Any? = nil) {
+        if window.isVisible {
+            hideClock()
+        } else {
+            showClock()
+        }
+    }
+
+    private func showClock() {
+        NSApp.unhide(nil)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        startClockActivity(syncImmediately: true)
+        updateMenuState()
+    }
+
+    private func hideClock() {
+        window.orderOut(nil)
+        stopClockActivity()
+        updateMenuState()
+    }
+
+    @objc private func showSettings(_ sender: Any? = nil) {
+        if settingsWindowController == nil {
+            let controller = SettingsWindowController()
+            controller.onChange = { [weak self] in
+                self?.applyPreferences()
+            }
+            settingsWindowController = controller
+        }
+        settingsWindowController?.show()
+    }
+
+    @objc private func toggleAlwaysOnTop(_ sender: Any? = nil) {
+        Preferences.alwaysOnTop.toggle()
+        applyPreferences()
+    }
+
+    @objc private func close(_ sender: Any? = nil) {
+        quit()
+    }
+
+    @objc private func quit(_ sender: Any? = nil) {
+        NSApp.terminate(nil)
+    }
+
+    @objc private func forceSync(_ sender: Any? = nil) {
         view.statusLabel.stringValue = "syncing"
-        clock.sync { [weak self] ok, status in
-            self?.view.statusLabel.stringValue = ok ? status : status
+        clock.sync { [weak self] status in
+            self?.view.statusLabel.stringValue = status
             self?.refreshDisplay()
         }
     }
 
     private func syncQuietly() {
-        clock.sync { [weak self] _, status in
+        clock.sync { [weak self] status in
             self?.view.statusLabel.stringValue = status
         }
     }
 
     private func refreshDisplay() {
         guard let date = clock.currentServerDate() else {
-            view.timeLabel.stringValue = "--:--:--.--"
+            view.timeLabel.stringValue = Preferences.showHundredths ? "--:--:--.--" : "--:--:--"
             view.dateLabel.stringValue = "Asia/Taipei"
             return
         }
 
-        view.timeLabel.stringValue = timeFormatter.string(from: date)
+        let formatter = Preferences.showHundredths ? hundredthsFormatter : secondsFormatter
+        view.timeLabel.stringValue = formatter.string(from: date)
         view.dateLabel.stringValue = dateFormatter.string(from: date)
 
         if let lastSync = clock.lastSync {
@@ -538,18 +850,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func formatMetrics(_ snap: MetricsSnapshot) -> String {
-        func ms(_ s: TimeInterval?) -> String {
-            guard let s else { return "--" }
-            return String(format: "%.0f", s * 1000)
+        func rounded(_ value: Double?, scale: Double = 1) -> String {
+            value.map { String(format: "%.0f", $0 * scale) } ?? "--"
         }
-        func msInt(_ d: Double?) -> String {
-            guard let d else { return "--" }
-            return String(format: "%.0f", d)
-        }
-        let rtt = ms(snap.rttMedian)
+        let rtt = rounded(snap.rttMedian, scale: 1000)
         let jit = snap.rttJitter.map { String(format: "±%.0f", $0 * 1000) } ?? ""
-        let ttfb = ms(snap.ttfb)
-        let vbe = msInt(snap.vbeMillis)
+        let ttfb = rounded(snap.ttfb, scale: 1000)
+        let vbe = rounded(snap.vbeMillis)
         return "RTT \(rtt)\(jit)  TTFB \(ttfb)  VBE \(vbe) ms"
     }
 }
@@ -557,4 +864,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 private let app = NSApplication.shared
 private let delegate = AppDelegate()
 app.delegate = delegate
+
+#if SELF_TEST
+TixcraftClock.runSelfTests()
+#else
 app.run()
+#endif
