@@ -3,56 +3,102 @@ set -euo pipefail
 
 APP_NAME="TixcraftTime"
 APP_DIR="$APP_NAME.app"
-BIN_DIR="$APP_DIR/Contents/MacOS"
-RES_DIR="$APP_DIR/Contents/Resources"
-CACHE_DIR=".build/module-cache"
 ICON_FILE="$APP_NAME.icns"
 ICON_SOURCE="assets/app-icon/$ICON_FILE"
+ENTITLEMENTS="TixcraftTime.entitlements"
+DEPLOYMENT_TARGET="12.0"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+CACHE_ROOT=".build/module-cache"
+TASK_TMP_ROOT="${TMPDIR:-/tmp}"
+STAGE_ROOT="$(mktemp -d "${TASK_TMP_ROOT%/}/tixcraft-time.XXXXXX")"
+STAGE_APP="$STAGE_ROOT/$APP_NAME.app"
 
-mkdir -p "$BIN_DIR" "$RES_DIR" "$CACHE_DIR"
+trap 'rm -rf "$STAGE_ROOT"' EXIT
 
-swiftc TixcraftFloatingTime.swift \
-  -module-cache-path "$CACHE_DIR" \
-  -framework AppKit \
-  -framework Foundation \
-  -o "$BIN_DIR/$APP_NAME"
+[[ -f "$ICON_SOURCE" ]] || { print -u2 "Missing app icon: $ICON_SOURCE"; exit 1; }
+[[ -f "$ENTITLEMENTS" ]] || { print -u2 "Missing entitlements: $ENTITLEMENTS"; exit 1; }
 
-cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+mkdir -p \
+  "$STAGE_APP/Contents/MacOS" \
+  "$STAGE_APP/Contents/Resources" \
+  "$CACHE_ROOT"
+
+for arch in arm64 x86_64; do
+  mkdir -p "$CACHE_ROOT/$arch"
+  swiftc TixcraftFloatingTime.swift \
+    -warnings-as-errors \
+    -target "${arch}-apple-macos${DEPLOYMENT_TARGET}" \
+    -module-cache-path "$CACHE_ROOT/$arch" \
+    -framework AppKit \
+    -framework Carbon \
+    -framework Foundation \
+    -o "$STAGE_ROOT/TixcraftTime-$arch"
+done
+
+lipo -create \
+  "$STAGE_ROOT/TixcraftTime-arm64" \
+  "$STAGE_ROOT/TixcraftTime-x86_64" \
+  -output "$STAGE_APP/Contents/MacOS/$APP_NAME"
+
+cat > "$STAGE_APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Tixcraft Time</string>
   <key>CFBundleExecutable</key>
   <string>TixcraftTime</string>
-  <key>CFBundleIdentifier</key>
-  <string>local.tixcraft-time.floating</string>
-  <key>CFBundleName</key>
-  <string>Tixcraft Time</string>
   <key>CFBundleIconFile</key>
   <string>TixcraftTime.icns</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.stephenlin999.tixcraft-time</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Tixcraft Time</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>1.1.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>2</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.utilities</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
-  <key>LSUIElement</key>
-  <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © 2026 Stephen Lin. MIT License.</string>
 </dict>
 </plist>
 PLIST
 
-if [[ -f "$ICON_SOURCE" ]]; then
-  cp "$ICON_SOURCE" "$RES_DIR/$ICON_FILE"
-fi
+cp "$ICON_SOURCE" "$STAGE_APP/Contents/Resources/$ICON_FILE"
+printf "APPL????" > "$STAGE_APP/Contents/PkgInfo"
+chmod +x "$STAGE_APP/Contents/MacOS/$APP_NAME"
 
-printf "APPL????" > "$APP_DIR/Contents/PkgInfo"
-chmod +x "$BIN_DIR/$APP_NAME"
-codesign --force --deep --sign - "$APP_DIR"
+sign_args=(
+  --force
+  --options runtime
+  --entitlements "$ENTITLEMENTS"
+  --sign "$SIGN_IDENTITY"
+)
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  sign_args+=(--timestamp=none)
+else
+  sign_args+=(--timestamp)
+fi
+codesign "${sign_args[@]}" "$STAGE_APP"
+
+plutil -lint "$STAGE_APP/Contents/Info.plist"
+codesign --verify --deep --strict --verbose=2 "$STAGE_APP"
+
+rm -rf "$APP_DIR"
+mv "$STAGE_APP" "$APP_DIR"
 touch "$APP_DIR"
-echo "Built $APP_DIR"
+echo "Built $APP_DIR (Universal arm64+x86_64, macOS $DEPLOYMENT_TARGET+)"
