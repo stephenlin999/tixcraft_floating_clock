@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import Foundation
+import UserNotifications
 
 private let tixcraftURL = URL(string: "https://tixcraft.com/activity")!
 private let taipeiTimeZone = TimeZone(identifier: "Asia/Taipei")!
@@ -45,6 +46,73 @@ private func formatCountdownInterval(_ interval: TimeInterval, showHundredths: B
     return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
 }
 
+private func formatMenuCountdown(_ interval: TimeInterval) -> String {
+    let seconds = max(0, Int(interval))
+    if seconds >= 86_400 {
+        return String(format: "%dd %02dh", seconds / 86_400, (seconds % 86_400) / 3_600)
+    }
+    if seconds >= 3_600 {
+        return String(format: "%d:%02d:%02d", seconds / 3_600, (seconds % 3_600) / 60, seconds % 60)
+    }
+    return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+}
+
+private func parseCountdownTarget(_ input: String, now: Date) -> Date? {
+    let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty else { return nil }
+
+    if value.hasPrefix("@") {
+        let time = String(value.dropFirst()).replacingOccurrences(of: " ", with: "")
+        let calendar = Calendar(identifier: .gregorian)
+        for format in ["H:mm:ss", "H:mm", "ha", "h:mma"] {
+            let formatter = makeFormatter(format, timeZone: taipeiTimeZone)
+            guard let parsed = formatter.date(from: time.lowercased()) else { continue }
+            let components = calendar.dateComponents(in: taipeiTimeZone, from: parsed)
+            var targetComponents = calendar.dateComponents(in: taipeiTimeZone, from: now)
+            targetComponents.hour = components.hour
+            targetComponents.minute = components.minute
+            targetComponents.second = components.second ?? 0
+            targetComponents.nanosecond = 0
+            guard var target = calendar.date(from: targetComponents) else { continue }
+            if target <= now {
+                target = calendar.date(byAdding: .day, value: 1, to: target)!
+            }
+            return target
+        }
+        return nil
+    }
+
+    for format in ["yyyy/MM/dd HH:mm:ss", "yyyy/MM/dd HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm"] {
+        let formatter = makeFormatter(format, timeZone: taipeiTimeZone)
+        if let target = formatter.date(from: value), target > now, target.timeIntervalSince1970 <= 4_102_444_800 {
+            return target
+        }
+    }
+
+    let scanner = Scanner(string: value.lowercased())
+    scanner.charactersToBeSkipped = .whitespaces
+    var duration: TimeInterval = 0
+    var foundComponent = false
+    while !scanner.isAtEnd {
+        guard let number = scanner.scanDouble(), number.isFinite, number > 0,
+              let unit = scanner.scanCharacters(from: .letters) else {
+            return nil
+        }
+        let scale: TimeInterval
+        switch unit {
+        case "s", "sec", "secs", "second", "seconds": scale = 1
+        case "m", "min", "mins", "minute", "minutes": scale = 60
+        case "h", "hr", "hrs", "hour", "hours": scale = 3_600
+        case "d", "day", "days": scale = 86_400
+        default: return nil
+        }
+        duration += number * scale
+        foundComponent = true
+    }
+    guard foundComponent, duration >= 1, duration <= 31_536_000 else { return nil }
+    return now.addingTimeInterval(duration)
+}
+
 private enum DisplayMode: String {
     case clock
     case countdown
@@ -60,6 +128,12 @@ private enum Preferences {
     private static let backgroundOpacityKey = "backgroundOpacity"
     private static let displayModeKey = "displayMode"
     private static let countdownDateKey = "countdownDate"
+    private static let countdownActiveKey = "countdownActive"
+    private static let countdownLabelKey = "countdownLabel"
+    private static let countdownAlertsKey = "countdownAlerts"
+    private static let dualTimeKey = "dualTime"
+    private static let keepAwakeKey = "keepAwake"
+    private static let keepDisplayAwakeKey = "keepDisplayAwake"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -71,7 +145,13 @@ private enum Preferences {
             clickThroughKey: false,
             backgroundOpacityKey: 0.88,
             displayModeKey: DisplayMode.clock.rawValue,
-            countdownDateKey: Date().addingTimeInterval(3600).timeIntervalSince1970
+            countdownDateKey: Date().addingTimeInterval(3600).timeIntervalSince1970,
+            countdownActiveKey: true,
+            countdownLabelKey: "",
+            countdownAlertsKey: false,
+            dualTimeKey: true,
+            keepAwakeKey: false,
+            keepDisplayAwakeKey: false
         ])
     }
 
@@ -119,11 +199,41 @@ private enum Preferences {
         get { Date(timeIntervalSince1970: UserDefaults.standard.double(forKey: countdownDateKey)) }
         set { UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: countdownDateKey) }
     }
+
+    static var countdownActive: Bool {
+        get { UserDefaults.standard.bool(forKey: countdownActiveKey) }
+        set { UserDefaults.standard.set(newValue, forKey: countdownActiveKey) }
+    }
+
+    static var countdownLabel: String {
+        get { UserDefaults.standard.string(forKey: countdownLabelKey) ?? "" }
+        set { UserDefaults.standard.set(String(newValue.prefix(80)), forKey: countdownLabelKey) }
+    }
+
+    static var countdownAlerts: Bool {
+        get { UserDefaults.standard.bool(forKey: countdownAlertsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: countdownAlertsKey) }
+    }
+
+    static var dualTime: Bool {
+        get { UserDefaults.standard.bool(forKey: dualTimeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: dualTimeKey) }
+    }
+
+    static var keepAwake: Bool {
+        get { UserDefaults.standard.bool(forKey: keepAwakeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: keepAwakeKey) }
+    }
+
+    static var keepDisplayAwake: Bool {
+        get { UserDefaults.standard.bool(forKey: keepDisplayAwakeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: keepDisplayAwakeKey) }
+    }
 }
 
 private final class SettingsWindowController: NSObject {
     let window: NSWindow
-    var onChange: (() -> Void)?
+    var onChange: ((Bool) -> Void)?
 
     private let alwaysOnTopButton = NSButton(
         checkboxWithTitle: "Keep the clock above other windows",
@@ -158,12 +268,34 @@ private final class SettingsWindowController: NSObject {
         action: nil
     )
     private let countdownPicker = NSDatePicker()
+    private let countdownLabelField = NSTextField(string: "")
+    private let countdownAlertsButton = NSButton(
+        checkboxWithTitle: "Alert 1 minute, 10 seconds, and at the target",
+        target: nil,
+        action: nil
+    )
+    private let notificationStatusLabel = NSTextField(labelWithString: "Notification permission: checking…")
+    private let dualTimeButton = NSButton(
+        checkboxWithTitle: "Show current time with the countdown",
+        target: nil,
+        action: nil
+    )
+    private let keepAwakeButton = NSButton(
+        checkboxWithTitle: "Prevent idle sleep until the target",
+        target: nil,
+        action: nil
+    )
+    private let keepDisplayAwakeButton = NSButton(
+        checkboxWithTitle: "Also keep the display awake",
+        target: nil,
+        action: nil
+    )
     private let opacitySlider = NSSlider(value: 88, minValue: 35, maxValue: 100, target: nil, action: nil)
     private let opacityValueLabel = NSTextField(labelWithString: "88%")
 
     override init() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 390),
+            contentRect: NSRect(x: 0, y: 0, width: 470, height: 540),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -183,7 +315,10 @@ private final class SettingsWindowController: NSObject {
         countdownPicker.datePickerMode = .single
         countdownPicker.datePickerElements = [.yearMonthDay, .hourMinuteSecond]
         countdownPicker.timeZone = taipeiTimeZone
+        countdownLabelField.placeholderString = "Optional countdown label"
+        countdownLabelField.widthAnchor.constraint(equalToConstant: 250).isActive = true
         opacityValueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        notificationStatusLabel.textColor = .secondaryLabelColor
 
         [
             alwaysOnTopButton,
@@ -194,6 +329,11 @@ private final class SettingsWindowController: NSObject {
             intervalPopup,
             modeControl,
             countdownPicker,
+            countdownLabelField,
+            countdownAlertsButton,
+            dualTimeButton,
+            keepAwakeButton,
+            keepDisplayAwakeButton,
             opacitySlider
         ].forEach {
             $0.target = self
@@ -219,6 +359,13 @@ private final class SettingsWindowController: NSObject {
         countdownRow.orientation = .horizontal
         countdownRow.spacing = 16
 
+        let countdownLabelRow = NSStackView(views: [
+            NSTextField(labelWithString: "Countdown label"),
+            countdownLabelField
+        ])
+        countdownLabelRow.orientation = .horizontal
+        countdownLabelRow.spacing = 16
+
         let opacityRow = NSStackView(views: [
             NSTextField(labelWithString: "Background opacity"),
             opacitySlider,
@@ -237,7 +384,13 @@ private final class SettingsWindowController: NSObject {
             opacityRow,
             intervalRow,
             modeRow,
-            countdownRow
+            countdownRow,
+            countdownLabelRow,
+            countdownAlertsButton,
+            notificationStatusLabel,
+            dualTimeButton,
+            keepAwakeButton,
+            keepDisplayAwakeButton
         ])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
@@ -272,11 +425,30 @@ private final class SettingsWindowController: NSObject {
         intervalPopup.selectItem(withTag: Int(Preferences.syncInterval))
         modeControl.selectedSegment = Preferences.displayMode == .clock ? 0 : 1
         countdownPicker.dateValue = Preferences.countdownDate
+        countdownLabelField.stringValue = Preferences.countdownLabel
+        countdownAlertsButton.state = Preferences.countdownAlerts ? .on : .off
+        dualTimeButton.state = Preferences.dualTime ? .on : .off
+        keepAwakeButton.state = Preferences.keepAwake ? .on : .off
+        keepDisplayAwakeButton.state = Preferences.keepDisplayAwake ? .on : .off
+        keepDisplayAwakeButton.isEnabled = Preferences.keepAwake
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            let status: String
+            switch settings.authorizationStatus {
+            case .authorized, .provisional: status = "allowed"
+            case .denied: status = "denied in System Settings"
+            case .notDetermined: status = "not requested"
+            @unknown default: status = "unavailable"
+            }
+            DispatchQueue.main.async {
+                self?.notificationStatusLabel.stringValue = "Notification permission: \(status)"
+            }
+        }
         opacitySlider.doubleValue = Double(Preferences.backgroundOpacity * 100)
         opacityValueLabel.stringValue = "\(Int(opacitySlider.doubleValue.rounded()))%"
     }
 
     @objc private func settingChanged() {
+        let shouldRequestNotifications = !Preferences.countdownAlerts && countdownAlertsButton.state == .on
         Preferences.alwaysOnTop = alwaysOnTopButton.state == .on
         Preferences.showHundredths = showHundredthsButton.state == .on
         Preferences.compactMode = compactModeButton.state == .on
@@ -285,11 +457,292 @@ private final class SettingsWindowController: NSObject {
         Preferences.backgroundOpacity = CGFloat(opacitySlider.doubleValue / 100)
         Preferences.displayMode = modeControl.selectedSegment == 1 ? .countdown : .clock
         Preferences.countdownDate = countdownPicker.dateValue
+        if Preferences.displayMode == .countdown {
+            Preferences.countdownActive = true
+        }
+        Preferences.countdownLabel = countdownLabelField.stringValue
+        Preferences.countdownAlerts = countdownAlertsButton.state == .on
+        Preferences.dualTime = dualTimeButton.state == .on
+        Preferences.keepAwake = keepAwakeButton.state == .on
+        Preferences.keepDisplayAwake = Preferences.keepAwake && keepDisplayAwakeButton.state == .on
+        keepDisplayAwakeButton.isEnabled = Preferences.keepAwake
         opacityValueLabel.stringValue = "\(Int(opacitySlider.doubleValue.rounded()))%"
         if let seconds = intervalPopup.selectedItem?.tag {
             Preferences.syncInterval = TimeInterval(seconds)
         }
-        onChange?()
+        onChange?(shouldRequestNotifications)
+    }
+}
+
+private final class CountdownWindowController: NSObject, NSTextFieldDelegate {
+    let window: NSWindow
+    var onSave: ((Date, String, Bool, Bool, Bool) -> Void)?
+
+    private let targetField = NSTextField(string: "")
+    private let labelField = NSTextField(string: "")
+    private let resolvedLabel = NSTextField(labelWithString: "")
+    private let alertsButton = NSButton(checkboxWithTitle: "Enable advance and target alerts", target: nil, action: nil)
+    private let notificationStatusLabel = NSTextField(labelWithString: "Notification permission: checking…")
+    private let keepAwakeButton = NSButton(checkboxWithTitle: "Prevent idle sleep until target", target: nil, action: nil)
+    private let keepDisplayAwakeButton = NSButton(checkboxWithTitle: "Also keep display awake", target: nil, action: nil)
+    private let saveButton = NSButton(title: "Set Countdown", target: nil, action: nil)
+    private var referenceDate = Date()
+    private var referenceUptime = ProcessInfo.processInfo.systemUptime
+    private var resolvedTarget: Date?
+
+    override init() {
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 390),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        super.init()
+
+        window.title = "Set Countdown"
+        window.isReleasedWhenClosed = false
+        window.setFrameAutosaveName("TixcraftTimeCountdownWindow")
+
+        targetField.placeholderString = "5m, 1h30m, @12:00, or 2026/09/20 12:00"
+        targetField.delegate = self
+        labelField.placeholderString = "Optional label"
+
+        let presets = NSSegmentedControl(
+            labels: ["+5m", "+10m", "+30m", "+1h"],
+            trackingMode: .momentary,
+            target: self,
+            action: #selector(selectPreset)
+        )
+        presets.segmentStyle = .rounded
+
+        resolvedLabel.textColor = .secondaryLabelColor
+        resolvedLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        notificationStatusLabel.textColor = .secondaryLabelColor
+
+        keepAwakeButton.target = self
+        keepAwakeButton.action = #selector(keepAwakeChanged)
+        keepDisplayAwakeButton.target = self
+        keepDisplayAwakeButton.action = #selector(refreshResolution)
+        alertsButton.target = self
+        alertsButton.action = #selector(refreshResolution)
+
+        saveButton.target = self
+        saveButton.action = #selector(save)
+        saveButton.keyEquivalent = "\r"
+        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancel))
+        cancelButton.keyEquivalent = "\u{1b}"
+
+        let buttons = NSStackView(views: [cancelButton, saveButton])
+        buttons.orientation = .horizontal
+        buttons.spacing = 10
+        buttons.alignment = .centerY
+
+        let stack = NSStackView(views: [
+            NSTextField(labelWithString: "Target"),
+            targetField,
+            presets,
+            resolvedLabel,
+            NSTextField(labelWithString: "Label"),
+            labelField,
+            alertsButton,
+            notificationStatusLabel,
+            keepAwakeButton,
+            keepDisplayAwakeButton,
+            buttons
+        ])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        targetField.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        labelField.widthAnchor.constraint(equalToConstant: 440).isActive = true
+
+        let content = NSView()
+        content.addSubview(stack)
+        window.contentView = content
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 22)
+        ])
+    }
+
+    func show(referenceDate: Date) {
+        self.referenceDate = referenceDate
+        referenceUptime = ProcessInfo.processInfo.systemUptime
+        targetField.stringValue = ""
+        labelField.stringValue = Preferences.countdownLabel
+        alertsButton.state = Preferences.countdownAlerts ? .on : .off
+        keepAwakeButton.state = Preferences.keepAwake ? .on : .off
+        keepDisplayAwakeButton.state = Preferences.keepDisplayAwake ? .on : .off
+        keepDisplayAwakeButton.isEnabled = Preferences.keepAwake
+        updateNotificationStatus()
+        refreshResolution()
+        if !window.setFrameUsingName("TixcraftTimeCountdownWindow") {
+            window.center()
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(targetField)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        refreshResolution()
+    }
+
+    @objc private func selectPreset(_ sender: NSSegmentedControl) {
+        let values = ["5m", "10m", "30m", "1h"]
+        guard values.indices.contains(sender.selectedSegment) else { return }
+        targetField.stringValue = values[sender.selectedSegment]
+        refreshResolution()
+    }
+
+    @objc private func keepAwakeChanged() {
+        keepDisplayAwakeButton.isEnabled = keepAwakeButton.state == .on
+        if keepAwakeButton.state == .off {
+            keepDisplayAwakeButton.state = .off
+        }
+        refreshResolution()
+    }
+
+    @objc private func refreshResolution() {
+        resolvedTarget = parseCountdownTarget(targetField.stringValue, now: currentReferenceDate())
+        saveButton.isEnabled = resolvedTarget != nil
+        if let target = resolvedTarget {
+            let formatter = makeFormatter("yyyy/MM/dd HH:mm:ss 'Asia/Taipei'", timeZone: taipeiTimeZone)
+            resolvedLabel.stringValue = "Resolves to \(formatter.string(from: target))"
+            resolvedLabel.textColor = .secondaryLabelColor
+        } else {
+            resolvedLabel.stringValue = "Enter a future duration, clock time, or date."
+            resolvedLabel.textColor = .systemRed
+        }
+    }
+
+    @objc private func save() {
+        guard let target = parseCountdownTarget(targetField.stringValue, now: currentReferenceDate()) else { return }
+        onSave?(
+            target,
+            String(labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)),
+            alertsButton.state == .on,
+            keepAwakeButton.state == .on,
+            keepAwakeButton.state == .on && keepDisplayAwakeButton.state == .on
+        )
+        window.orderOut(nil)
+    }
+
+    @objc private func cancel() {
+        window.orderOut(nil)
+    }
+
+    private func updateNotificationStatus() {
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            let status: String
+            switch settings.authorizationStatus {
+            case .authorized, .provisional: status = "allowed"
+            case .denied: status = "denied in System Settings"
+            case .notDetermined: status = "will be requested when enabled"
+            @unknown default: status = "unavailable"
+            }
+            DispatchQueue.main.async {
+                self?.notificationStatusLabel.stringValue = "Notification permission: \(status)"
+            }
+        }
+    }
+
+    private func currentReferenceDate() -> Date {
+        referenceDate.addingTimeInterval(ProcessInfo.processInfo.systemUptime - referenceUptime)
+    }
+}
+
+private final class CountdownAlerts: NSObject, UNUserNotificationCenterDelegate {
+    private let center = UNUserNotificationCenter.current()
+    private let identifiers = ["countdown-60", "countdown-10", "countdown-0"]
+    private var targetEpoch: TimeInterval?
+    private var passedThresholds: Set<Int> = []
+    private var generation = 0
+
+    func start() {
+        center.delegate = self
+    }
+
+    func configure(
+        target: Date,
+        label: String,
+        remaining: TimeInterval,
+        enabled: Bool,
+        requestPermission: Bool
+    ) {
+        generation += 1
+        let currentGeneration = generation
+        if targetEpoch != target.timeIntervalSince1970 {
+            targetEpoch = target.timeIntervalSince1970
+            passedThresholds.removeAll()
+        }
+
+        [60, 10, 0].filter { remaining <= TimeInterval($0) }.forEach {
+            passedThresholds.insert($0)
+        }
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        guard enabled, remaining > 0 else { return }
+
+        center.getNotificationSettings { [weak self] settings in
+            guard let self else { return }
+            if settings.authorizationStatus == .notDetermined && requestPermission {
+                self.center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    guard granted else { return }
+                    self.schedule(
+                        target: target,
+                        label: label,
+                        remaining: remaining,
+                        generation: currentGeneration
+                    )
+                }
+            } else if settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional {
+                self.schedule(target: target, label: label, remaining: remaining, generation: currentGeneration)
+            }
+        }
+    }
+
+    func cancel() {
+        generation += 1
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    }
+
+    private func schedule(target: Date, label: String, remaining: TimeInterval, generation: Int) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  generation == self.generation,
+                  target.timeIntervalSince1970 == self.targetEpoch else { return }
+
+            let name = label.isEmpty ? "Countdown" : label
+            for threshold in [60, 10, 0] where !self.passedThresholds.contains(threshold) {
+                let delay = remaining - TimeInterval(threshold)
+                guard delay >= 1 else { continue }
+
+                let content = UNMutableNotificationContent()
+                content.title = "Tixcraft Time"
+                switch threshold {
+                case 60: content.body = "\(name) reaches its target in 1 minute."
+                case 10: content.body = "\(name) reaches its target in 10 seconds."
+                default: content.body = "\(name) target reached."
+                }
+                content.sound = .default
+                let request = UNNotificationRequest(
+                    identifier: "countdown-\(threshold)",
+                    content: content,
+                    trigger: UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
+                )
+                self.center.add(request)
+            }
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
     }
 }
 
@@ -339,6 +792,11 @@ private struct MetricsSnapshot {
     var vbeMillis: Double?
 }
 
+private enum TimeSource: String {
+    case xTimer = "X-Timer"
+    case httpDate = "HTTP Date"
+}
+
 private final class FloatingTimeView: NSView {
     let titleLabel = NSTextField(labelWithString: "TIXCRAFT")
     let timeLabel = NSTextField(labelWithString: "--:--:--.--")
@@ -352,6 +810,8 @@ private final class FloatingTimeView: NSView {
     private var trackingArea: NSTrackingArea?
     private var isCompact = false
     private var isHovering = false
+    private var statusText = "connecting"
+    private var statusColor = NSColor.systemYellow
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -378,6 +838,8 @@ private final class FloatingTimeView: NSView {
 
         dateLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         dateLabel.textColor = NSColor(calibratedWhite: 0.83, alpha: 1)
+        dateLabel.cell?.lineBreakMode = .byTruncatingTail
+        dateLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         statusLabel.font = .systemFont(ofSize: 11, weight: .medium)
         statusLabel.textColor = NSColor(calibratedRed: 0.55, green: 0.95, blue: 0.67, alpha: 1)
@@ -431,7 +893,11 @@ private final class FloatingTimeView: NSView {
 
             syncButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -2),
             syncButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            syncButton.widthAnchor.constraint(equalToConstant: 42)
+            syncButton.widthAnchor.constraint(equalToConstant: 42),
+
+            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            statusLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            statusLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 12)
         ]
         NSLayoutConstraint.activate(regularConstraints)
     }
@@ -469,7 +935,9 @@ private final class FloatingTimeView: NSView {
         isCompact = compact
         NSLayoutConstraint.deactivate(compact ? regularConstraints : compactConstraints)
         NSLayoutConstraint.activate(compact ? compactConstraints : regularConstraints)
-        [titleLabel, dateLabel, statusLabel, metricsLabel].forEach { $0.isHidden = compact }
+        [titleLabel, dateLabel, metricsLabel].forEach { $0.isHidden = compact }
+        statusLabel.isHidden = false
+        renderStatus()
         updateCompactControls()
         needsLayout = true
     }
@@ -484,10 +952,31 @@ private final class FloatingTimeView: NSView {
     func applyScale(for width: CGFloat) {
         let baseWidth: CGFloat = isCompact ? 240 : 286
         let scale = min(max(width / baseWidth, 0.8), 1.8)
+        let baseSize: CGFloat = timeLabel.stringValue == "TARGET REACHED" ? 22 : (isCompact ? 30 : 32)
         timeLabel.font = .monospacedDigitSystemFont(
-            ofSize: (isCompact ? 30 : 32) * scale,
+            ofSize: baseSize * scale,
             weight: .semibold
         )
+    }
+
+    func setTime(_ text: String) {
+        guard timeLabel.stringValue != text else { return }
+        timeLabel.stringValue = text
+        applyScale(for: bounds.width)
+    }
+
+    func setStatus(_ text: String, color: NSColor) {
+        guard statusText != text || statusColor != color else { return }
+        statusText = text
+        statusColor = color
+        renderStatus()
+    }
+
+    private func renderStatus() {
+        statusLabel.stringValue = isCompact ? "●" : statusText
+        statusLabel.textColor = statusColor
+        statusLabel.toolTip = statusText
+        statusLabel.setAccessibilityLabel(statusText)
     }
 
     private func updateCompactControls() {
@@ -557,8 +1046,14 @@ private final class GlobalHotKey {
 }
 
 private final class TixcraftClock {
+    private struct ParsedTime {
+        let date: Date
+        let source: TimeSource
+    }
+
     private struct ServerSample {
         let serverDate: Date
+        let source: TimeSource
         let midpoint: TimeInterval
         let roundTrip: TimeInterval
         let ttfb: TimeInterval?
@@ -567,6 +1062,7 @@ private final class TixcraftClock {
 
     private var anchor: (date: Date, uptime: TimeInterval)?
     private(set) var lastSync: Date?
+    private(set) var source: TimeSource?
     private var isSyncing = false
     private let shutdownLock = NSLock()
     private var shutdownRequested = false
@@ -644,6 +1140,7 @@ private final class TixcraftClock {
 
     private func finishSync(
         anchor: (date: Date, uptime: TimeInterval)? = nil,
+        source: TimeSource? = nil,
         status: String,
         completion: @escaping (String) -> Void
     ) {
@@ -653,6 +1150,7 @@ private final class TixcraftClock {
             if let anchor {
                 self.anchor = anchor
                 self.lastSync = Date()
+                self.source = source
             }
             self.isSyncing = false
             completion(status)
@@ -684,6 +1182,7 @@ private final class TixcraftClock {
                 let boundaryUptime = previous.midpoint + (sample.midpoint - previous.midpoint) / 2
                 self.finishSync(
                     anchor: (sample.serverDate, boundaryUptime),
+                    source: sample.source,
                     status: "edge sync",
                     completion: completion
                 )
@@ -693,6 +1192,7 @@ private final class TixcraftClock {
             if ProcessInfo.processInfo.systemUptime >= deadline {
                 self.finishSync(
                     anchor: (sample.serverDate, sample.midpoint),
+                    source: sample.source,
                     status: "sec sync",
                     completion: completion
                 )
@@ -754,7 +1254,8 @@ private final class TixcraftClock {
                 .flatMap(Self.parseVBE)
             let midpoint = started + max(0, ended - started) / 2
             completion(ServerSample(
-                serverDate: parsed,
+                serverDate: parsed.date,
+                source: parsed.source,
                 midpoint: midpoint,
                 roundTrip: ended - started,
                 ttfb: capturedTTFB,
@@ -763,17 +1264,17 @@ private final class TixcraftClock {
         }
     }
 
-    private static func parseHighPrecisionTime(from response: HTTPURLResponse) -> Date? {
+    private static func parseHighPrecisionTime(from response: HTTPURLResponse) -> ParsedTime? {
         if let xTimer = response.value(forHTTPHeaderField: "X-Timer"),
            let startEpoch = parseXTimerValue(xTimer, prefix: "S"),
            (946_684_800...4_102_444_800).contains(startEpoch) {
-            return Date(timeIntervalSince1970: startEpoch)
+            return ParsedTime(date: Date(timeIntervalSince1970: startEpoch), source: .xTimer)
         }
 
         if let dateValue = response.value(forHTTPHeaderField: "Date"),
            let date = httpDateFormatter.date(from: dateValue),
            (946_684_800...4_102_444_800).contains(date.timeIntervalSince1970) {
-            return date
+            return ParsedTime(date: date, source: .httpDate)
         }
 
         return nil
@@ -805,9 +1306,19 @@ private final class TixcraftClock {
         precondition(formatCountdownInterval(90_061, showHundredths: false) == "1d 01:01:01")
         precondition(formatCountdownInterval(3_661.5, showHundredths: true) == "01:01:01.50")
         precondition(formatCountdownInterval(-1, showHundredths: false) == "00:00:00")
+        precondition(formatMenuCountdown(65) == "01:05")
+        precondition(formatMenuCountdown(3_661) == "1:01:01")
         precondition(isTrustedTixcraftURL(tixcraftURL))
         precondition(!isTrustedTixcraftURL(URL(string: "https://example.com/activity")))
         precondition(!isTrustedTixcraftURL(URL(string: "http://tixcraft.com/activity")))
+
+        let targetFormatter = makeFormatter("yyyy/MM/dd HH:mm:ss", timeZone: taipeiTimeZone)
+        let targetNow = targetFormatter.date(from: "2026/09/20 11:00:00")!
+        precondition(parseCountdownTarget("5m", now: targetNow)?.timeIntervalSince(targetNow) == 300)
+        precondition(parseCountdownTarget("1h30m", now: targetNow)?.timeIntervalSince(targetNow) == 5_400)
+        precondition(targetFormatter.string(from: parseCountdownTarget("@12:00", now: targetNow)!) == "2026/09/20 12:00:00")
+        precondition(targetFormatter.string(from: parseCountdownTarget("@10:00", now: targetNow)!) == "2026/09/21 10:00:00")
+        precondition(parseCountdownTarget("tomorrow", now: targetNow) == nil)
 
         let validDate = Date(timeIntervalSince1970: 1_700_000_000)
         let dateHeader = httpDateFormatter.string(from: validDate)
@@ -817,7 +1328,7 @@ private final class TixcraftClock {
             httpVersion: nil,
             headerFields: ["X-Timer": "S1700000000.25,VE12.5"]
         )!
-        precondition(parseHighPrecisionTime(from: validResponse) != nil)
+        precondition(parseHighPrecisionTime(from: validResponse)?.source == .xTimer)
 
         let fallbackResponse = HTTPURLResponse(
             url: tixcraftURL,
@@ -825,7 +1336,7 @@ private final class TixcraftClock {
             httpVersion: nil,
             headerFields: ["X-Timer": "S999", "Date": dateHeader]
         )!
-        precondition(parseHighPrecisionTime(from: fallbackResponse) != nil)
+        precondition(parseHighPrecisionTime(from: fallbackResponse)?.source == .httpDate)
         print("Self-tests passed")
     }
 #endif
@@ -834,18 +1345,24 @@ private final class TixcraftClock {
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let view = FloatingTimeView(frame: NSRect(x: 0, y: 0, width: 286, height: 132))
     private let clock = TixcraftClock()
+    private let countdownAlerts = CountdownAlerts()
     private var window: NSWindow!
     private var displayTimer: Timer?
     private var syncTimer: Timer?
     private var statusItem: NSStatusItem?
     private var globalHotKey: GlobalHotKey?
     private var settingsWindowController: SettingsWindowController?
+    private var countdownWindowController: CountdownWindowController?
+    private var keepAwakeActivity: NSObjectProtocol?
+    private var keepAwakeTimer: Timer?
+    private var keepAwakeOptions: ProcessInfo.ActivityOptions = []
     private var clockVisibilityItems: [NSMenuItem] = []
     private var alwaysOnTopItems: [NSMenuItem] = []
     private var compactModeItems: [NSMenuItem] = []
     private var lockPositionItems: [NSMenuItem] = []
     private var clickThroughItems: [NSMenuItem] = []
     private var displayModeItems: [NSMenuItem] = []
+    private var keepAwakeItems: [NSMenuItem] = []
     private var appliedCompactMode: Bool?
     private var isSnapping = false
     private var syncState = "connecting"
@@ -854,6 +1371,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private let secondsFormatter = makeFormatter("HH:mm:ss", timeZone: taipeiTimeZone)
     private let dateFormatter = makeFormatter("yyyy/MM/dd", timeZone: taipeiTimeZone)
     private let countdownDateFormatter = makeFormatter("yyyy/MM/dd HH:mm:ss", timeZone: taipeiTimeZone)
+    private let countdownShortFormatter = makeFormatter("MM/dd HH:mm:ss", timeZone: taipeiTimeZone)
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
@@ -861,12 +1379,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     func applicationWillTerminate(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
         stopClockActivity()
+        stopKeepAwake()
+        countdownAlerts.cancel()
         clock.shutdown()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Preferences.registerDefaults()
+        countdownAlerts.start()
         NSApp.setActivationPolicy(.regular)
         NSApp.mainMenu = makeMainMenu()
         configureWindow()
@@ -880,6 +1402,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             self,
             selector: #selector(wakeFromSleep),
             name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
         applyPreferences()
@@ -907,12 +1435,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func configureWindow() {
         let size = view.frame.size
-        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let targetScreen = preferredScreen()
+        let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let origin = NSPoint(x: screenFrame.maxX - size.width - 28, y: screenFrame.maxY - size.height - 28)
         let frameName = "TixcraftFloatingClockWindow"
+        let initialFrame = targetScreen.flatMap(storedFrame(for:)) ?? NSRect(origin: origin, size: size)
 
         window = FloatingWindow(
-            contentRect: NSRect(origin: origin, size: size),
+            contentRect: initialFrame,
             styleMask: [.borderless, .resizable],
             backing: .buffered,
             defer: false
@@ -925,8 +1455,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         window.isMovableByWindowBackground = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.setFrameAutosaveName(frameName)
-        if !window.setFrameUsingName(frameName) {
-            window.setFrameOrigin(origin)
+        if targetScreen.flatMap(storedFrame(for:)) == nil && window.setFrameUsingName(frameName) {
+            constrainWindow(to: targetScreen)
         }
 
         view.closeButton.target = self
@@ -938,12 +1468,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func configureStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.autosaveName = "TixcraftTimeStatusItem"
         item.isVisible = true
         if let button = item.button {
             button.image = NSImage(systemSymbolName: "clock", accessibilityDescription: "Tixcraft Time")
             button.image?.isTemplate = true
+            button.imagePosition = .imageLeading
             button.toolTip = "Tixcraft Time"
             button.setAccessibilityLabel("Tixcraft Time")
         }
@@ -951,6 +1482,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let menu = NSMenu(title: "Tixcraft Time")
         menu.addItem(makeVisibilityMenuItem())
         menu.addItem(menuItem("Sync Now", action: #selector(forceSync)))
+        menu.addItem(menuItem("Set Countdown…", action: #selector(showCountdownSetup)))
+        menu.addItem(menuItem("Cancel Countdown", action: #selector(cancelCountdown)))
         addClockControls(to: menu)
         menu.addItem(menuItem("Settings…", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(.separator())
@@ -964,6 +1497,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func makeClockContextMenu() -> NSMenu {
         let menu = NSMenu(title: "Clock Controls")
         menu.addItem(menuItem("Sync Now", action: #selector(forceSync)))
+        menu.addItem(menuItem("Set Countdown…", action: #selector(showCountdownSetup)))
+        menu.addItem(menuItem("Cancel Countdown", action: #selector(cancelCountdown)))
         addClockControls(to: menu)
         menu.addItem(menuItem("Settings…", action: #selector(showSettings)))
         menu.addItem(.separator())
@@ -994,6 +1529,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         clickThroughItems.append(clickThrough)
         menu.addItem(clickThrough)
 
+        let keepAwake = menuItem("Keep Awake Until Target", action: #selector(toggleKeepAwake))
+        keepAwakeItems.append(keepAwake)
+        menu.addItem(keepAwake)
+
         menu.addItem(menuItem("Move to Current Screen", action: #selector(moveToCurrentScreen)))
         menu.addItem(.separator())
     }
@@ -1011,6 +1550,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         aboutItem.target = NSApp
         appMenu.addItem(aboutItem)
         appMenu.addItem(.separator())
+        appMenu.addItem(menuItem("Set Countdown…", action: #selector(showCountdownSetup)))
+        appMenu.addItem(menuItem("Cancel Countdown", action: #selector(cancelCountdown)))
         appMenu.addItem(menuItem("Settings…", action: #selector(showSettings), keyEquivalent: ","))
         appMenu.addItem(.separator())
 
@@ -1075,9 +1616,42 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         compactModeItems.forEach { $0.state = Preferences.compactMode ? .on : .off }
         lockPositionItems.forEach { $0.state = Preferences.lockPosition ? .on : .off }
         clickThroughItems.forEach { $0.state = Preferences.clickThrough ? .on : .off }
+        keepAwakeItems.forEach {
+            $0.state = keepAwakeActivity == nil ? .off : .on
+            $0.isEnabled = Preferences.countdownActive
+        }
         displayModeItems.forEach {
             $0.title = Preferences.displayMode == .clock ? "Show Countdown" : "Show Clock"
         }
+        updateStatusItem(serverDate: clock.currentServerDate())
+    }
+
+    private func updateStatusItem(serverDate: Date?) {
+        guard let button = statusItem?.button else { return }
+        if window?.isVisible != true {
+            let title = Preferences.countdownActive ? " Paused" : ""
+            let toolTip = Preferences.countdownActive
+                ? "Clock updates are paused; scheduled countdown alerts remain active."
+                : "Tixcraft Time"
+            if button.title != title { button.title = title }
+            if button.toolTip != toolTip { button.toolTip = toolTip }
+            return
+        }
+        guard Preferences.displayMode == .countdown,
+              Preferences.countdownActive,
+              let serverDate else {
+            if !button.title.isEmpty { button.title = "" }
+            if button.toolTip != "Tixcraft Time" { button.toolTip = "Tixcraft Time" }
+            return
+        }
+        let remaining = Preferences.countdownDate.timeIntervalSince(serverDate)
+        let title = remaining <= 0 ? " Done" : " \(formatMenuCountdown(remaining))"
+        let toolTip = Preferences.countdownLabel.isEmpty
+            ? "Tixcraft Time countdown"
+            : Preferences.countdownLabel
+        if button.title != title { button.title = title }
+        if button.toolTip != toolTip { button.toolTip = toolTip }
+        button.setAccessibilityLabel(toolTip)
     }
 
     private func startClockActivity(syncImmediately: Bool) {
@@ -1116,7 +1690,66 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         syncTimer = timer
     }
 
-    private func applyPreferences() {
+    private func countdownTitle() -> String {
+        guard Preferences.displayMode == .countdown else { return "TIXCRAFT" }
+        let label = Preferences.countdownLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.isEmpty ? "COUNTDOWN" : String(label.uppercased().prefix(28))
+    }
+
+    private func configureCountdownServices(requestNotifications: Bool = false) {
+        guard Preferences.countdownActive,
+              let serverDate = clock.currentServerDate(),
+              let lastSync = clock.lastSync,
+              Date().timeIntervalSince(lastSync) <= max(Preferences.syncInterval * 3, 60) else {
+            countdownAlerts.cancel()
+            stopKeepAwake()
+            return
+        }
+        let remaining = Preferences.countdownDate.timeIntervalSince(serverDate)
+        countdownAlerts.configure(
+            target: Preferences.countdownDate,
+            label: Preferences.countdownLabel,
+            remaining: remaining,
+            enabled: Preferences.countdownAlerts,
+            requestPermission: requestNotifications
+        )
+
+        guard Preferences.keepAwake, remaining > 0 else {
+            stopKeepAwake()
+            return
+        }
+        var options: ProcessInfo.ActivityOptions = [.userInitiated, .idleSystemSleepDisabled]
+        if Preferences.keepDisplayAwake {
+            options.insert(.idleDisplaySleepDisabled)
+        }
+        if keepAwakeActivity == nil || options != keepAwakeOptions {
+            stopKeepAwake()
+            keepAwakeOptions = options
+            keepAwakeActivity = ProcessInfo.processInfo.beginActivity(
+                options: options,
+                reason: "Active Tixcraft Time countdown"
+            )
+        }
+        keepAwakeTimer?.invalidate()
+        let timer = Timer(timeInterval: remaining, repeats: false) { [weak self] _ in
+            self?.stopKeepAwake()
+            self?.refreshDisplay()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        keepAwakeTimer = timer
+    }
+
+    private func stopKeepAwake() {
+        keepAwakeTimer?.invalidate()
+        keepAwakeTimer = nil
+        if let activity = keepAwakeActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            keepAwakeActivity = nil
+        }
+        keepAwakeOptions = []
+    }
+
+    private func applyPreferences(requestNotifications: Bool = false) {
         window?.level = Preferences.alwaysOnTop ? .floating : .normal
         window?.isMovable = !Preferences.lockPosition
         window?.isMovableByWindowBackground = !Preferences.lockPosition
@@ -1128,8 +1761,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         applyWindowMode()
         view.setBackgroundOpacity(Preferences.backgroundOpacity)
-        view.titleLabel.stringValue = Preferences.displayMode == .clock ? "TIXCRAFT" : "COUNTDOWN"
+        view.titleLabel.stringValue = countdownTitle()
         settingsWindowController?.reload()
+        configureCountdownServices(requestNotifications: requestNotifications)
         updateMenuState()
         if window?.isVisible == true {
             scheduleDisplayTimer()
@@ -1187,8 +1821,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     @objc private func showSettings(_ sender: Any? = nil) {
         if settingsWindowController == nil {
             let controller = SettingsWindowController()
-            controller.onChange = { [weak self] in
-                self?.applyPreferences()
+            controller.onChange = { [weak self] requestNotifications in
+                self?.applyPreferences(requestNotifications: requestNotifications)
             }
             settingsWindowController = controller
         }
@@ -1215,8 +1849,44 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         applyPreferences()
     }
 
+    @objc private func toggleKeepAwake(_ sender: Any? = nil) {
+        Preferences.keepAwake.toggle()
+        if !Preferences.keepAwake {
+            Preferences.keepDisplayAwake = false
+        }
+        applyPreferences()
+    }
+
     @objc private func toggleDisplayMode(_ sender: Any? = nil) {
         Preferences.displayMode = Preferences.displayMode == .clock ? .countdown : .clock
+        applyPreferences()
+    }
+
+    @objc private func showCountdownSetup(_ sender: Any? = nil) {
+        if countdownWindowController == nil {
+            let controller = CountdownWindowController()
+            controller.onSave = { [weak self] target, label, alerts, keepAwake, keepDisplayAwake in
+                let shouldRequestNotifications = alerts && !Preferences.countdownAlerts
+                Preferences.countdownDate = target
+                Preferences.countdownLabel = label
+                Preferences.countdownAlerts = alerts
+                Preferences.keepAwake = keepAwake
+                Preferences.keepDisplayAwake = keepDisplayAwake
+                Preferences.countdownActive = true
+                Preferences.displayMode = .countdown
+                self?.applyPreferences(requestNotifications: shouldRequestNotifications)
+                self?.showClock()
+            }
+            countdownWindowController = controller
+        }
+        countdownWindowController?.show(referenceDate: clock.currentServerDate() ?? Date())
+    }
+
+    @objc private func cancelCountdown(_ sender: Any? = nil) {
+        Preferences.countdownActive = false
+        Preferences.displayMode = .clock
+        countdownAlerts.cancel()
+        stopKeepAwake()
         applyPreferences()
     }
 
@@ -1224,16 +1894,66 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
         guard let visibleFrame = screen?.visibleFrame else { return }
-        let origin = NSPoint(
-            x: visibleFrame.maxX - window.frame.width - 12,
-            y: visibleFrame.maxY - window.frame.height - 12
-        )
-        window.setFrameOrigin(origin)
+        if let screen, let saved = storedFrame(for: screen) {
+            window.setFrame(window.constrainFrameRect(saved, to: screen), display: true)
+        } else {
+            let origin = NSPoint(
+                x: visibleFrame.maxX - window.frame.width - 12,
+                y: visibleFrame.maxY - window.frame.height - 12
+            )
+            window.setFrameOrigin(origin)
+        }
         showClock()
     }
 
+    private func preferredScreen() -> NSScreen? {
+        NSScreen.screens.max {
+            $0.visibleFrame.width * $0.visibleFrame.height < $1.visibleFrame.width * $1.visibleFrame.height
+        } ?? NSScreen.main
+    }
+
+    private func screenStorageKey(_ screen: NSScreen) -> String {
+        let width = Int(screen.frame.width * screen.backingScaleFactor)
+        let height = Int(screen.frame.height * screen.backingScaleFactor)
+        return "TixcraftClockFrame.\(screen.localizedName).\(width)x\(height)"
+    }
+
+    private func storedFrame(for screen: NSScreen) -> NSRect? {
+        guard let value = UserDefaults.standard.string(forKey: screenStorageKey(screen)) else { return nil }
+        let frame = NSRectFromString(value)
+        return frame.width > 0 && frame.height > 0 ? frame : nil
+    }
+
+    private func saveFrame(for screen: NSScreen) {
+        UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: screenStorageKey(screen))
+    }
+
+    private func constrainWindow(to screen: NSScreen?) {
+        guard let screen else { return }
+        window.setFrame(window.constrainFrameRect(window.frame, to: screen), display: false)
+    }
+
+    @objc private func screenParametersChanged(_ notification: Notification) {
+        guard window != nil, let screen = preferredScreen() else { return }
+        if let saved = storedFrame(for: screen) {
+            window.setFrame(window.constrainFrameRect(saved, to: screen), display: true)
+        } else {
+            let visibleFrame = screen.visibleFrame
+            window.setFrameOrigin(NSPoint(
+                x: visibleFrame.maxX - window.frame.width - 12,
+                y: visibleFrame.maxY - window.frame.height - 12
+            ))
+        }
+    }
+
     @objc private func wakeFromSleep(_ notification: Notification) {
-        guard window.isVisible else { return }
+        if Preferences.countdownDate <= Date() {
+            stopKeepAwake()
+        }
+        guard window.isVisible else {
+            updateMenuState()
+            return
+        }
         forceSync()
     }
 
@@ -1249,50 +1969,81 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         syncState = "syncing"
         refreshDisplay()
         clock.sync { [weak self] status in
-            self?.syncState = status
-            self?.refreshDisplay()
+            guard let self else { return }
+            self.syncState = status
+            if status != "syncing" && status != "sync failed" {
+                self.configureCountdownServices()
+            }
+            self.refreshDisplay()
         }
     }
 
     private func syncQuietly() {
         syncState = "syncing"
         clock.sync { [weak self] status in
-            self?.syncState = status
-            self?.refreshDisplay()
+            guard let self else { return }
+            self.syncState = status
+            if status != "syncing" && status != "sync failed" {
+                self.configureCountdownServices()
+            }
+            self.refreshDisplay()
         }
     }
 
     private func refreshDisplay() {
         guard let date = clock.currentServerDate() else {
-            view.timeLabel.stringValue = Preferences.showHundredths ? "--:--:--.--" : "--:--:--"
+            view.setTime(Preferences.showHundredths ? "--:--:--.--" : "--:--:--")
             view.dateLabel.stringValue = "Asia/Taipei"
-            view.statusLabel.stringValue = syncState
+            view.setStatus(syncState, color: syncState == "sync failed" ? .systemRed : .systemYellow)
+            updateStatusItem(serverDate: nil)
             return
         }
 
-        if Preferences.displayMode == .countdown {
-            view.timeLabel.stringValue = formatCountdownInterval(
-                Preferences.countdownDate.timeIntervalSince(date),
-                showHundredths: Preferences.showHundredths
-            )
-            view.dateLabel.stringValue = "Target \(countdownDateFormatter.string(from: Preferences.countdownDate))"
+        view.titleLabel.stringValue = countdownTitle()
+        if Preferences.displayMode == .countdown && Preferences.countdownActive {
+            let remaining = Preferences.countdownDate.timeIntervalSince(date)
+            if remaining <= 0 {
+                view.setTime("TARGET REACHED")
+                view.dateLabel.stringValue = "Target \(countdownDateFormatter.string(from: Preferences.countdownDate))"
+                stopKeepAwake()
+            } else {
+                view.setTime(formatCountdownInterval(
+                    remaining,
+                    showHundredths: Preferences.showHundredths
+                ))
+                if Preferences.dualTime {
+                    view.dateLabel.stringValue = "Now \(secondsFormatter.string(from: date))  •  \(countdownShortFormatter.string(from: Preferences.countdownDate))"
+                } else {
+                    view.dateLabel.stringValue = "Target \(countdownDateFormatter.string(from: Preferences.countdownDate))"
+                }
+            }
+            view.dateLabel.toolTip = "Target \(countdownDateFormatter.string(from: Preferences.countdownDate)) Asia/Taipei"
+        } else if Preferences.displayMode == .countdown {
+            view.setTime("NO TARGET")
+            view.dateLabel.stringValue = "Choose Set Countdown from the menu"
         } else {
             let formatter = Preferences.showHundredths ? hundredthsFormatter : secondsFormatter
-            view.timeLabel.stringValue = formatter.string(from: date)
+            view.setTime(formatter.string(from: date))
             view.dateLabel.stringValue = dateFormatter.string(from: date)
+            view.dateLabel.toolTip = "Estimated Tixcraft domain time in Asia/Taipei"
         }
 
         if syncState == "syncing" || syncState == "sync failed" {
-            view.statusLabel.stringValue = syncState
+            view.setStatus(syncState, color: syncState == "sync failed" ? .systemRed : .systemYellow)
         } else if let lastSync = clock.lastSync {
             let age = Int(Date().timeIntervalSince(lastSync))
             let staleAfter = max(Int(Preferences.syncInterval * 3), 60)
-            view.statusLabel.stringValue = age > staleAfter
-                ? "stale \(age)s"
-                : (age < 2 ? "synced" : "synced \(age)s ago")
+            let source = clock.source?.rawValue ?? "unknown source"
+            if age > staleAfter {
+                view.setStatus("stale \(age)s • \(source)", color: .systemOrange)
+            } else {
+                let ageText = age < 2 ? "synced" : "synced \(age)s ago"
+                view.setStatus("\(ageText) • \(source)", color: .systemGreen)
+            }
         }
 
         view.metricsLabel.stringValue = formatMetrics(clock.currentMetrics())
+        updateStatusItem(serverDate: date)
     }
 
     private func formatMetrics(_ snap: MetricsSnapshot) -> String {
@@ -1308,6 +2059,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     func windowDidResize(_ notification: Notification) {
         view.applyScale(for: window.contentView?.bounds.width ?? window.frame.width)
+        if let screen = window.screen {
+            saveFrame(for: screen)
+        }
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -1326,19 +2080,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if abs(frame.minY - bottom) <= threshold { origin.y = bottom }
         if abs(frame.minY - top) <= threshold { origin.y = top }
 
-        guard origin != frame.origin else { return }
-        isSnapping = true
-        window.setFrameOrigin(origin)
-        isSnapping = false
+        if origin != frame.origin {
+            isSnapping = true
+            window.setFrameOrigin(origin)
+            isSnapping = false
+        }
+        if let screen = window.screen {
+            saveFrame(for: screen)
+        }
     }
 }
-
-private let app = NSApplication.shared
-private let delegate = AppDelegate()
-app.delegate = delegate
 
 #if SELF_TEST
 TixcraftClock.runSelfTests()
 #else
+private let app = NSApplication.shared
+private let delegate = AppDelegate()
+app.delegate = delegate
 app.run()
 #endif

@@ -22,8 +22,12 @@
 | --- | --- |
 | Domain clock | `HH:mm:ss.SS` display using `X-Timer`, with HTTP `Date` as fallback |
 | Floating workflow | Always on top, all Spaces, edge snapping, resizing, position saving, locking, and click-through |
-| Compact view | A time-only layout whose controls appear when the pointer enters the clock |
-| Countdown | Switch between the live clock and a countdown to a configurable target |
+| Compact view | A minimal time layout with a color-coded sync indicator and hover details |
+| Countdown | Quick duration/time entry, labels, presets, dual-time display, and an explicit reached state |
+| Alerts | Optional local alerts at 1 minute, 10 seconds, and the target time |
+| Menu bar | Remaining time while visible and an explicit paused state while the floating clock is hidden |
+| Display setup | Per-monitor position memory and automatic restoration when displays change |
+| Keep awake | Optional idle-sleep prevention until the target, with a separate display-awake choice |
 | Native controls | Dock presence, standard app menus, menu bar item, right-click menu, and Settings window |
 | Fast access | Global `Command + Option + T` shortcut to show or hide the clock |
 | Resource control | Display and synchronization timers pause while hidden and stop completely on Quit |
@@ -67,24 +71,31 @@ A Developer ID build must still be submitted to Apple Notarization before public
 | Move | Drag an unused area of the floating clock |
 | Resize | Drag a window edge; the clock keeps its aspect ratio |
 | Open clock controls | Right-click the floating clock or use the menu bar item |
+| Set a target quickly | Select **Set Countdown…**, then enter `5m`, `1h30m`, `@12:00`, or a Taipei date/time |
+| Use a preset | Select `+5m`, `+10m`, `+30m`, or `+1h` in the countdown window |
+| Cancel target services | Select **Cancel Countdown** to remove pending alerts and release keep-awake |
 | Switch clock/countdown | Settings, menu bar, or the clock's right-click menu |
 | Recover from click-through | Use the menu bar item, Dock/main menu, or global shortcut |
 | Restore an off-screen clock | Select **Move to Current Screen** |
 | Exit completely | Press `X` on the clock or choose **Quit Tixcraft Time** |
 
-Choosing **Hide Clock** keeps the menu bar item available while pausing display and scheduled synchronization work. Pressing `X` or choosing **Quit** invalidates timers, cancels network work, and terminates the process.
+Choosing **Hide Clock** keeps the menu bar item available but marks it **Paused** and stops display and synchronization timers. Already scheduled local alerts and an explicitly enabled keep-awake session remain active until the target. Showing the clock resumes display work and immediately synchronizes.
+
+Pressing `X`, choosing **Quit**, or selecting **Cancel Countdown** removes pending countdown alerts and releases keep-awake. A force-quit cannot run the app's termination cleanup, so an alert already handed to macOS may remain scheduled.
+
+Countdown alerts use the latest recent accepted time estimate. Changing a target replaces its pending alerts; thresholds already passed are skipped rather than delivered late. Notification permission is requested only when alerts are explicitly enabled, and its current state appears in Settings and the countdown window. Notification delivery and sound remain subject to macOS settings and are not a subsecond timing guarantee.
 
 ## How Synchronization Works
 
 Tixcraft Time sends a `HEAD` request to `https://tixcraft.com/activity`, validates the final HTTPS host, and reads the response time headers. It prefers the fractional `X-Timer` value and falls back to HTTP `Date` when needed.
 
-The app estimates the observation point using the network round-trip midpoint, then advances the accepted timestamp using macOS monotonic uptime. Recent RTT, jitter, TTFB, and VBE values remain visible in the detailed clock view. It resynchronizes on the selected 15, 30, or 60 second interval and after the Mac wakes.
+The app estimates the observation point using the network round-trip midpoint, then advances the accepted timestamp using macOS monotonic uptime. Recent RTT, jitter, TTFB, and VBE values remain visible in the detailed clock view. The status identifies whether the accepted observation came from `X-Timer` or HTTP `Date`; compact mode preserves it as a colored indicator with hover and accessibility text. The app resynchronizes on the selected 15, 30, or 60 second interval and after the Mac wakes.
 
 `X-Timer` normally describes CDN or edge timing, while HTTP `Date` has whole-second precision. Network asymmetry, caching, and upstream behavior can all affect the estimate. Extra decimal places should not be interpreted as guaranteed accuracy.
 
 ## Privacy and Security
 
-The app has no account system, analytics, payment access, embedded browser, or ticket-purchase automation. Its sandbox only requests outbound network access. Requests start at the fixed Tixcraft HTTPS endpoint, and redirects away from `https://tixcraft.com` are rejected.
+The app has no account system, analytics, payment access, embedded browser, or ticket-purchase automation. Its sandbox only requests outbound network access. Countdown notifications are scheduled locally through macOS and add no backend. Requests start at the fixed Tixcraft HTTPS endpoint, and redirects away from `https://tixcraft.com` are rejected.
 
 See [Security Guidelines](SECURITY_GUIDELINES.md) for the threat model and proposed requirements. The [Security Review Guide](SECURITY_REVIEW_GUIDE.md) preserves the dated 2026-09-05 baseline and adversarial verification matrix.
 
@@ -96,13 +107,13 @@ build_app.sh                 Universal build, bundle, validation, and signing
 run.sh                       Build and launch helper
 TixcraftTime.entitlements    Sandbox permissions
 assets/                      App icon and repository artwork
+NEXT_STEPS_RESEARCH.md       Comparable-tool research and implementation decisions
 ```
 
 ## Roadmap
 
 - Developer ID signing and Apple Notarization in CI
-- Runtime smoke tests on macOS 12 and macOS 13
-- Optional countdown notifications without purchase automation
+- Notification, sleep/wake, and display-change smoke tests across supported macOS releases
 - Additional time-source profiles after the single-source trust model is stable
 
 ## License

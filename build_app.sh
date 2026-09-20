@@ -32,6 +32,7 @@ for arch in arm64 x86_64; do
     -framework AppKit \
     -framework Carbon \
     -framework Foundation \
+    -framework UserNotifications \
     -o "$STAGE_ROOT/TixcraftTime-$arch"
 done
 
@@ -63,9 +64,9 @@ cat > "$STAGE_APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.1.0</string>
+  <string>1.2.0</string>
   <key>CFBundleVersion</key>
-  <string>2</string>
+  <string>3</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.utilities</string>
   <key>LSMinimumSystemVersion</key>
