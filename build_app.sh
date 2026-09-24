@@ -3,8 +3,8 @@ set -euo pipefail
 
 APP_NAME="TixcraftTime"
 APP_DIR="$APP_NAME.app"
-ICON_FILE="$APP_NAME.icns"
-ICON_SOURCE="assets/app-icon/$ICON_FILE"
+ICON_FILE="$APP_NAME-Round.icns"
+ICON_SOURCE="assets/app-icon/$APP_NAME.icns"
 ENTITLEMENTS="TixcraftTime.entitlements"
 DEPLOYMENT_TARGET="12.0"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
@@ -54,7 +54,7 @@ cat > "$STAGE_APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>
   <string>TixcraftTime</string>
   <key>CFBundleIconFile</key>
-  <string>TixcraftTime.icns</string>
+  <string>TixcraftTime-Round.icns</string>
   <key>CFBundleIdentifier</key>
   <string>io.github.stephenlin999.tixcraft-time</string>
   <key>CFBundleInfoDictionaryVersion</key>
